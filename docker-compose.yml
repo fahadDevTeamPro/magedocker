@@ -1,0 +1,165 @@
+## Mark Shust's Docker Configuration for Magento
+## (https://github.com/markshust/docker-magento)
+##
+## Version 41.0.2
+
+## To use SSH, see https://github.com/markshust/docker-magento#ssh
+## Linux users, see https://github.com/markshust/docker-magento#linux
+
+## If you changed the default Docker network, you may need to replace
+## 172.17.0.1 in this file with the result of:
+## docker network inspect bridge --format='{{(index .IPAM.Config 0).Gateway}}'
+
+services:
+  app:
+    image: markoshust/magento-nginx:1.24-0
+    ports:
+      - "80:8000"
+      - "443:8443"
+    volumes: &appvolumes
+      - ~/.composer:/var/www/.composer:cached
+      #- ~/.ssh/id_rsa:/var/www/.ssh/id_rsa:cached
+      #- ~/.ssh/known_hosts:/var/www/.ssh/known_hosts:cached
+      - ~/.ssh:/var/www/.ssh:cached
+      - appdata:/var/www/html
+      - sockdata:/sock
+      - ssldata:/etc/nginx/certs
+    extra_hosts: &appextrahosts
+      ## M1 Mac support to fix Docker delay, see #566
+      - "app:172.17.0.1"
+      - "phpfpm:172.17.0.1"
+      - "db:172.17.0.1"
+      - "redis:172.17.0.1"
+      - "opensearch:172.17.0.1"
+      - "rabbitmq:172.17.0.1"
+      - "mailhog:172.17.0.1"
+      ## Selenium support, replace "magento.test" with URL of your site
+      - "magento.test:172.17.0.1"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    security_opt:
+      - seccomp:unconfined
+
+  phpfpm:
+    image: markoshust/magento-php:8.4-fpm-0
+    volumes:
+      - ~/.composer:/var/www/.composer:cached
+      #- ~/.ssh/id_rsa:/var/www/.ssh/id_rsa:cached
+      #- ~/.ssh/known_hosts:/var/www/.ssh/known_hosts:cached
+      - ~/.ssh:/var/www/.ssh:cached
+      - appdata:/var/www/html
+      - sockdata:/sock
+      - ssldata:/etc/nginx/certs
+      - ./env/php.ini:/usr/local/etc/php/conf.d/zz-magento.ini:cached
+    extra_hosts: *appextrahosts
+    env_file: env/phpfpm.env
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    security_opt:
+      - seccomp:unconfined
+
+  #phpmyadmin:
+  #  image: linuxserver/phpmyadmin
+  #  env_file: env/db.env
+  #  ports:
+  #    - "8080:80"
+  #  depends_on:
+  #    - db
+
+  db:
+    image: mariadb:10.6
+    command: --max_allowed_packet=64M
+    ports:
+      - "3306:3306"
+    env_file: env/db.env
+    volumes:
+      - ./dbdata:/var/lib/mysql
+    cap_add:
+      - SYS_NICE
+    security_opt:
+      - seccomp:unconfined
+    #extra_hosts: *appextrahosts
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    #extra_hosts: *appextrahosts
+
+  opensearch:
+    image: markoshust/magento-opensearch:2.12-0
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    env_file: env/opensearch.env
+    environment:
+      - "discovery.type=single-node"
+      ## Avoid test failures due to small disks
+      ## More info at https://github.com/markshust/docker-magento/issues/488
+      - "cluster.routing.allocation.disk.threshold_enabled=false"
+      - "index.blocks.read_only_allow_delete"
+      ## Set custom heap size to avoid memory errors
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+      ## Uncomment to increase the virtual memory map count
+      #- "max_map_count=262144"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    security_opt:
+      - seccomp:unconfined
+    #extra_hosts: *appextrahosts
+
+  #elasticsearch:
+    #image: markoshust/magento-elasticsearch:8.13-0
+    #ports:
+    #  - "9200:9200"
+    #  - "9300:9300"
+    #environment:
+    #  - "discovery.type=single-node"
+      ## Set custom heap size to avoid memory errors
+    #  - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      ## Avoid test failures due to small disks
+      ## More info at https://github.com/markshust/docker-magento/issues/488
+    #  - "cluster.routing.allocation.disk.threshold_enabled=false"
+    #  - "index.blocks.read_only_allow_delete"
+      ## Disable security for development (ES 8.x has security enabled by default)
+    #  - "xpack.security.enabled=false"
+    #  - "xpack.security.http.ssl.enabled=false"
+    #extra_hosts: *appextrahosts
+
+  rabbitmq:
+    image: markoshust/magento-rabbitmq:3.12-0
+    ports:
+      - "15672:15672"
+      - "5672:5672"
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    env_file: env/rabbitmq.env
+    #extra_hosts: *appextrahosts
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025"  # SMTP server
+      - "8025:8025"  # Web UI
+    #extra_hosts: *appextrahosts
+
+  ## Selenium support, uncomment to enable
+  #selenium:
+  #  image: selenium/standalone-chrome-debug:3.8.1
+  #  ports:
+  #    - "5900:5900"
+  #  extra_hosts: *appextrahosts
+
+volumes:
+  appdata:
+  rabbitmqdata:
+  sockdata:
+  ssldata:
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1500

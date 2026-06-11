@@ -1,0 +1,23 @@
+services:
+  app:
+    volumes: &appvolumes
+      ## Host mounts with performance penalty, only put what is necessary here
+      #- ./src:/var/www/html:delegated
+      #- ./env/env.php:/var/www/html/app/etc/env.php:delegated
+      #- ./env/nginx-sample.conf:/var/www/html/nginx.conf:delegated
+      - ./src/nginx.conf.sample:/var/www/html/nginx.conf:cached
+      #- ./env/default.conf:/etc/nginx/conf.d/default.conf:delegated
+      - ./src:/var/www/html:delegated
+      - ./env/env.php:/var/www/html/app/etc/env.php:delegated
+      #- ./env/nginx-sample.conf:/var/www/html/nginx.conf:delegated
+      - ./env/default.conf:/etc/nginx/conf.d/default.conf:delegated
+      - ./env/php.ini.sample:/usr/local/etc/php/php.ini:delegated
+      #- ./env/php.ini.sample:/usr/local/etc/php/php.ini:delegated
+      #- ./src/auth.json:/var/www/html/auth.json:cached
+      #- ./src/m2-hotfixes:/var/www/html/m2-hotfixes:cached
+      #- ./src/patches:/var/www/html/patches:cached
+      #- ./src/var/log:/var/www/html/var/log:cached
+      #- ./src/var/report:/var/www/html/var/report:cached
+
+  phpfpm:
+    volumes: *appvolumes
