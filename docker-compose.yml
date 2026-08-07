@@ -52,8 +52,17 @@ services:
       - sockdata:/sock
       - ssldata:/etc/nginx/certs
       - ./env/php.ini:/usr/local/etc/php/conf.d/zz-magento.ini:cached
+      - ./env/msmtprc:/etc/msmtprc:cached
     #extra_hosts: *appextrahosts
     env_file: env/phpfpm.env
+    entrypoint: >
+      sh -c "
+      if [ ! -x /usr/bin/msmtp ]; then
+        apt-get update -qq && apt-get install -y -qq msmtp msmtp-mta ca-certificates;
+        apt-get remove -y -qq exim4-daemon-light exim4-base exim4-config 2>/dev/null || true;
+      fi;
+      ln -sf /usr/bin/msmtp /usr/sbin/sendmail;
+      docker-php-entrypoint php-fpm"
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -139,8 +148,8 @@ services:
     env_file: env/rabbitmq.env
     #extra_hosts: *appextrahosts
 
-  mailhog:
-    image: mailhog/mailhog:latest
+  mailpit:
+    image: axllent/mailpit:latest
     ports:
       - "1025:1025"  # SMTP server
       - "8025:8025"  # Web UI
