@@ -1,0 +1,111 @@
+#!/bin/bash
+#
+# Build the Hyvä Tailwind themes.
+#
+# Mirrors the production sequence in bitbucket-pipelines.yml (bg-magentohyva),
+# minus the deploy/maintenance steps.
+#
+# Usage:
+#   bin/build-hyva                        # build all themes + static content
+#   bin/build-hyva hyva                   # build one theme
+#   bin/build-hyva hyva hyvaMassageWarehouse
+#   bin/build-hyva --watch hyva           # tailwind watch mode (dev, one theme)
+#   bin/build-hyva --no-static            # skip setup:static-content:deploy
+#   bin/build-hyva --skip-install         # reuse node_modules, skip npm ci
+#   bin/build-hyva --cms                  # also recompile Hyvä CMS JIT css
+#
+set -o errexit
+set -o pipefail
+
+ALL_THEMES=(hyva hyvaAllegroMedical hyvaMassageWarehouse)
+THEME_BASE=app/design/frontend/ScripCo
+
+WATCH=0
+STATIC=1
+INSTALL=1
+CMS=0
+THEMES=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --watch)        WATCH=1 ;;
+    --no-static)    STATIC=0 ;;
+    --skip-install) INSTALL=0 ;;
+    --cms)          CMS=1 ;;
+    -h|--help)      awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
+    -*)             echo "Unknown option: $1" >&2; exit 1 ;;
+    *)              THEMES+=("$1") ;;
+  esac
+  shift
+done
+
+[ ${#THEMES[@]} -eq 0 ] && THEMES=("${ALL_THEMES[@]}")
+
+# Validate theme names before doing any work.
+for THEME in "${THEMES[@]}"; do
+  if [ ! -d "src/${THEME_BASE}/${THEME}/web/tailwind" ]; then
+    echo "No tailwind directory for theme '${THEME}'." >&2
+    echo "Available: ${ALL_THEMES[*]}" >&2
+    exit 1
+  fi
+done
+
+if [ $WATCH -eq 1 ] && [ ${#THEMES[@]} -ne 1 ]; then
+  echo "--watch builds a single theme; name one, e.g. bin/build-hyva --watch hyva" >&2
+  exit 1
+fi
+
+# Node 20 is required (web/tailwind/.nvmrc). Fail early with a clear message
+# rather than halfway through a tailwind build.
+NODE_MAJOR=$(bin/clinotty node -e 'process.stdout.write(process.versions.node.split(".")[0])' 2>/dev/null || true)
+if [ -z "$NODE_MAJOR" ]; then
+  echo "Cannot reach node in the phpfpm container. Is the stack running? (bin/start)" >&2
+  exit 1
+fi
+if [ "$NODE_MAJOR" -lt 20 ]; then
+  echo "Node ${NODE_MAJOR} found, Node >= 20 required (see web/tailwind/.nvmrc)." >&2
+  exit 1
+fi
+
+# hyva:config:generate writes the module/theme list that `npx hyva-sources`
+# reads. It must run before npm, and again after any composer install or
+# module enable/disable, or Tailwind scans a stale file list.
+echo "==> Generating Hyvä config and icons"
+bin/magento canary:icons:generate
+bin/magento hyva:config:generate
+
+for THEME in "${THEMES[@]}"; do
+  TAILWIND_DIR="${THEME_BASE}/${THEME}/web/tailwind"
+
+  if [ $INSTALL -eq 1 ]; then
+    echo "==> ${THEME}: npm ci"
+    bin/cli npm --prefix "$TAILWIND_DIR" ci
+  fi
+
+  if [ $WATCH -eq 1 ]; then
+    echo "==> ${THEME}: tailwind watch (ctrl-c to stop)"
+    bin/cli npm --prefix "$TAILWIND_DIR" run watch
+    exit 0
+  fi
+
+  echo "==> ${THEME}: tailwind build"
+  bin/cli npm --prefix "$TAILWIND_DIR" run build
+done
+
+echo "==> Clearing preprocessed and static files"
+bin/clinotty rm -rf var/view_preprocessed pub/static/frontend pub/static/adminhtml
+
+if [ $STATIC -eq 1 ]; then
+  echo "==> setup:static-content:deploy"
+  bin/magento setup:static-content:deploy -f
+fi
+
+if [ $CMS -eq 1 ]; then
+  echo "==> Recompiling Hyvä CMS Tailwind"
+  bin/magento hyva:cms-tailwind:recompile
+fi
+
+bin/magento ves_megamenu:cleancache
+bin/magento cache:flush
+
+echo "==> Done: ${THEMES[*]}"
