@@ -17,7 +17,6 @@ eb67a288cce2c98e5ef8de2e9871b62d'
                 'password' => 'magento',
                 'model' => 'mysql4',
                 'engine' => 'innodb',
-                'initStatements' => 'SET NAMES utf8;',
                 'active' => '1',
                 'driver_options' => [
                     1014 => false
@@ -91,7 +90,9 @@ eb67a288cce2c98e5ef8de2e9871b62d'
         'webhooks_response' => 1,
         'graphql_query_resolver_result' => 1,
         'cache_import_product' => 1,
-        'scripco_eav_attributes' => 0
+        'scripco_eav_attributes' => 0,
+        'elasticsuite' => 1,
+        'hyva_admin_dashboard' => 1
     ],
     'downloadable_domains' => [
         'magento2.test'
