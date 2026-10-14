@@ -94,7 +94,23 @@ During the next bot wave, New Relic should show `shipping-information`, `set-pay
 `payment-information` counts for the bot's host near zero while Fastly stats show the 429s, and
 `POST /checkout/cart/add/product/<id>/` for the bot SKU continuing (expected).
 
-## 5. Rollback
+## 5. Automated checks (`test/`)
+
+Playwright scripts that drive a real browser against a storefront. They never place an order.
+
+```
+cd fastly/test && npm install && npx playwright install chromium
+BASE_URL=https://mc.mwh-uat.scrip-inc.net STORE_CODE=massagewarehouse npm run checkout   # real guest checkout, then a fresh-stamp replay that must 429
+npm run sweep10    # shipping-information + set-payment-information at 3…36 s: 429 below 10 s, origin status above
+npm run sweep30    # PUT …/order + POST …/payment-information at 5…35 s from /checkout/: 429 below 30 s
+```
+
+`PRODUCT_URL` picks the product page used for add-to-cart (default is an MW item). `HOST_IP` pins the host
+to an IP if the browser cannot resolve it. In `monitor` mode everything passes and the sweeps show origin
+statuses only; in `block` mode they show the 429 boundaries. Other edge rules (country blocking, bot rules
+that need browser context) can answer 403/405/503 ahead of the gate — compare against a curl of the same URL.
+
+## 6. Rollback
 
 - Instant: set `cart_age_gate_mode` to `monitor` in the dictionary.
 - Full: deactivate or delete the three snippets and Upload VCL to Fastly again.
