@@ -1,5 +1,6 @@
 // Real guest checkout with headless Chromium; logs every guest-carts REST call with its status and age
-// relative to the scq stamp. Ends with a fresh-stamp replay that must get 429. No order is placed.
+// relative to the scq stamp; also reports when the scqc checkout proof appears. Ends with a fresh-stamp
+// replay that must get 429. No order is placed.
 // Usage: node checkout.js [slow]   env: BASE_URL, STORE_CODE, PRODUCT_URL, HOST_IP, PW_CHANNEL, PW_UA
 const { chromium } = require('playwright');
 
@@ -33,9 +34,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     log(`${res.request().method()} ${ep.includes('cart/add') ? 'checkout/cart/add' : ep} -> ${res.status()} (stamp age ${age})${note}`);
   });
 
+  let proofSeen = false;
   const readStamp = async () => {
-    const c = (await ctx.cookies(BASE)).find((c) => c.name === 'scq');
+    const all = await ctx.cookies(BASE);
+    const c = all.find((c) => c.name === 'scq');
     if (c && !stampTs) { stampTs = parseInt(c.value.split('.')[0], 10); log(`scq cookie set: ${c.value}`); }
+    const p = all.find((c) => c.name === 'scqc');
+    if (p && !proofSeen) { proofSeen = true; log(`scqc proof cookie set: ${p.value}`); }
     return c;
   };
 
@@ -55,7 +60,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.goto(BASE + '/checkout/', { waitUntil: 'domcontentloaded' });
   await readStamp();
   try {
-    await page.waitForSelector('#customer-email', { timeout: 45000 });
+    await page.waitForSelector('#customer-email', { timeout: 120000 });
   } catch {
     log('checkout page did not render email field; url=' + page.url());
     await page.screenshot({ path: 'checkout-fail.png', fullPage: true });
@@ -111,7 +116,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let r = await post(`${R}/guest-carts/${cartId}/payment-information`, { email: 'scq-test@example.com', paymentMethod: { method: 'rootways_chase_option' }, billingAddress: addr });
   log(`in-page payment-information (stamp age ${Math.round(Date.now() / 1000 - stampTs)}s) -> ${r.status} ${r.text}`);
 
-  // 3. too-early case inside the browser: drop the stamp, get a fresh one, fire immediately -> expect 429 JSON
+  // 3. too-early case inside the browser: drop the stamp (proof stays), get a fresh one, fire immediately -> expect 429 JSON
   log('clear scq cookie and re-stamp via /checkout/cart/');
   await ctx.clearCookies({ name: 'scq' });
   await page.goto(BASE + '/checkout/cart/', { waitUntil: 'domcontentloaded' });

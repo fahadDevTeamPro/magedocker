@@ -16,15 +16,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.goto(BASE + '/checkout/', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#customer-email', { timeout: 60000 });
   const cartId = await page.evaluate(() => window.checkoutConfig.quoteData.entity_id);
-  // fresh stamp, obtained without leaving the /checkout/ page context
+  // fresh stamp without leaving the /checkout/ page context (proof cookie scqc stays)
   await ctx.clearCookies({ name: 'scq' });
-  await page.evaluate(() => fetch('/checkout/', { credentials: 'include' }));
+  await page.evaluate(() => fetch('/checkout/cart/', { credentials: 'include' }));
   await sleep(1000);
   const scq = (await ctx.cookies(BASE)).find((c) => c.name === 'scq');
   const ts = parseInt(scq.value.split('.')[0], 10);
   console.log('page context: ' + page.url() + '\nfresh stamp: ' + scq.value);
   const call = (method, path, body) => page.evaluate(async ({ method, path, body }) => {
-    const r = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify(body) });
+    const r = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) });
     return r.status + ' ' + (await r.text()).slice(0, 70);
   }, { method, path, body });
   const addr = { firstname: 'Scq', lastname: 'Gatetest', street: ['123 Main St'], city: 'Chicago', region_id: 23, country_id: 'US', postcode: '60601', telephone: '3125551234' };

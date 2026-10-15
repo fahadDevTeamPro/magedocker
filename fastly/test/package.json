@@ -6,7 +6,10 @@
     "checkout": "node checkout.js",
     "checkout:slow": "node checkout.js slow",
     "sweep10": "node sweep.js",
-    "sweep30": "node sweep30.js"
+    "sweep30": "node sweep30.js",
+    "proof": "node proof.js",
+    "bypass": "node bypass.js",
+    "journeys": "node journeys.js"
   },
   "dependencies": {
     "playwright": "^1.64.1"
