@@ -1,8 +1,9 @@
 // Real guest checkout with headless Chromium; logs every guest-carts REST call with its status and age
 // relative to the scq stamp; also reports when the scqc checkout proof appears. Ends with a fresh-stamp
-// replay that must get 429. No order is placed.
+// replay that must be BLOCKED (needs SCQ_DEBUG_TOKEN, see debug.js). No order is placed.
 // Usage: node checkout.js [slow]   env: BASE_URL, STORE_CODE, PRODUCT_URL, HOST_IP, PW_CHANNEL, PW_UA
 const { chromium } = require('playwright');
+const { DEBUG_HEADERS, label } = require('./debug');
 
 // Shared config for the cart-age gate tests. Override with env vars when testing another store.
 const BASE = (process.env.BASE_URL || 'https://mc.mwh-uat.scrip-inc.net').replace(/\/$/, '');
@@ -17,7 +18,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   const args = process.env.HOST_IP ? [`--host-resolver-rules=MAP ${new URL(BASE).host} ${process.env.HOST_IP}`] : [];
   const browser = await chromium.launch({ args, channel: process.env.PW_CHANNEL || undefined });
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, ...(process.env.PW_UA ? { userAgent: process.env.PW_UA } : {}) });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, extraHTTPHeaders: DEBUG_HEADERS, ...(process.env.PW_UA ? { userAgent: process.env.PW_UA } : {}) });
   const page = await ctx.newPage();
   let stampTs = null;
 
@@ -27,7 +28,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const ep = u.replace(/.*\/guest-carts\/[^/]+\//, '').replace(/.*\/carts\/mine\//, 'mine/').replace(/\?.*/, '');
     const age = stampTs ? `${Math.round(Date.now() / 1000 - stampTs)}s` : 'n/a';
     let note = '';
-    if (res.status() === 429) note = ' <- SCQ gate';
+    const h = await res.allHeaders();
+    if (h['x-scq-blocked']) note = ` <- SCQ gate (${h['x-scq-verdict'] || '?'})`;
     else if (res.status() >= 400) {
       try { note = ' ' + (await res.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 120); } catch {}
     }
@@ -100,31 +102,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // 1. select Chase -> the checkout JS fires set-payment-information (10 s tier, stamp is old -> must pass gate)
   if (methods.includes('rootways_chase_option')) {
-    log('select Chase (triggers set-payment-information; headless gets no reCAPTCHA token, expect origin 400 after ~20 s, NOT 429)');
+    log('select Chase (triggers set-payment-information; headless gets no reCAPTCHA token, expect origin 400 after ~20 s, NOT BLOCKED)');
     await page.locator('input[name="payment[method]"][value="rootways_chase_option"]').check();
     await page.waitForResponse((r) => /set-payment-information/.test(r.url()), { timeout: 40000 }).catch(() => log('no set-payment-information response within 40 s'));
   }
   // 2. place-order call from inside the page (same cookies/Origin as the real JS, no captcha token):
-  //    30 s tier, stamp is old -> must pass gate; origin then rejects for missing captcha (400), NOT 429
+  //    30 s tier, stamp is old -> must pass gate; origin then rejects for missing captcha (400), NOT BLOCKED
   const cartId = await page.evaluate(() => window.checkoutConfig && window.checkoutConfig.quoteData && window.checkoutConfig.quoteData.entity_id);
   log('masked cart id from checkoutConfig: ' + cartId);
   const post = (path, body) => page.evaluate(async ({ path, body }) => {
     const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) });
-    return { status: r.status, text: (await r.text()).slice(0, 140) };
+    return { status: r.status, blocked: r.headers.get('x-scq-blocked'), verdict: r.headers.get('x-scq-verdict') || '-', text: (await r.text()).slice(0, 140) };
   }, { path, body });
   const addr = { firstname: 'Scq', lastname: 'Gatetest', street: ['123 Main St'], city: 'Chicago', region_id: 23, region: 'Illinois', country_id: 'US', postcode: '60601', telephone: '3125551234' };
   let r = await post(`${R}/guest-carts/${cartId}/payment-information`, { email: 'scq-test@example.com', paymentMethod: { method: 'rootways_chase_option' }, billingAddress: addr });
-  log(`in-page payment-information (stamp age ${Math.round(Date.now() / 1000 - stampTs)}s) -> ${r.status} ${r.text}`);
+  log(`in-page payment-information (stamp age ${Math.round(Date.now() / 1000 - stampTs)}s) -> ${label(r.status, r.blocked)} verdict=${r.verdict} ${r.text}`);
 
-  // 3. too-early case inside the browser: drop the stamp (proof stays), get a fresh one, fire immediately -> expect 429 JSON
+  // 3. too-early case inside the browser: drop the stamp (proof stays), get a fresh one, fire immediately -> expect BLOCKED
   log('clear scq cookie and re-stamp via /checkout/cart/');
   await ctx.clearCookies({ name: 'scq' });
   await page.goto(BASE + '/checkout/cart/', { waitUntil: 'domcontentloaded' });
   stampTs = null; await readStamp();
   r = await post(`${R}/guest-carts/${cartId}/shipping-information`, { addressInformation: { shipping_address: addr, shipping_carrier_code: 'flatrate', shipping_method_code: 'flatrate' } });
-  log(`in-page shipping-information (stamp age ${Math.round(Date.now() / 1000 - stampTs)}s) -> ${r.status} ${r.text}`);
+  log(`in-page shipping-information (stamp age ${Math.round(Date.now() / 1000 - stampTs)}s) -> ${label(r.status, r.blocked)} verdict=${r.verdict} ${r.text}`);
   r = await post(`${R}/guest-carts/${cartId}/payment-information`, { email: 'scq-test@example.com', paymentMethod: { method: 'rootways_chase_option' }, billingAddress: addr });
-  log(`in-page payment-information (stamp age ${Math.round(Date.now() / 1000 - stampTs)}s) -> ${r.status} ${r.text}`);
+  log(`in-page payment-information (stamp age ${Math.round(Date.now() / 1000 - stampTs)}s) -> ${label(r.status, r.blocked)} verdict=${r.verdict} ${r.text}`);
   await page.screenshot({ path: `checkout-${SLOW ? 'slow' : 'fast'}.png`, fullPage: true });
   await browser.close();
 })().catch(async (e) => { log('ERROR ' + e.message); process.exit(1); });

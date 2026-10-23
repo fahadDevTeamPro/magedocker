@@ -4,7 +4,8 @@
 //   - endpoints the checkout uses freely (GET payment-information, estimate, totals, logged-in carts,
 //     GraphQL queries) must NOT be refused
 //   - GraphQL cart mutations, including escaped / oversized bodies, must be refused
-// "refused" = 429 in block mode; in monitor mode the response carries X-SCQ-Verdict instead.
+// "refused" = X-SCQ-Blocked in block mode; in monitor mode the response carries X-SCQ-Verdict instead
+// (both only with SCQ_DEBUG_TOKEN, see debug.js). Also checks that the checkout-JS calls issue scqj.
 // Needs: node 18+. No browser, no cart, no order.
 // UAT answers IPv4 clients with a 405 block page (older edge rule); prefer IPv6 like the browsers do
 require('dns').setDefaultResultOrder('ipv6first');
@@ -13,7 +14,8 @@ const BASE = (process.env.BASE_URL || 'https://mc.mwh-uat.scrip-inc.net').replac
 const STORE = process.env.STORE_CODE || 'massagewarehouse';
 const ID = 'abcdefghijklmnopqrstuvwxyz012345';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
-const H = { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': UA };
+const { DEBUG_HEADERS } = require('./debug');
+const H = { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'User-Agent': UA, ...DEBUG_HEADERS };
 
 const gated = [
   ['POST', `/rest/${STORE}/V1/guest-carts/${ID}/shipping-information`],
@@ -59,12 +61,12 @@ const gqlFree = [
 const call = async (method, path, body) => {
   const r = await fetch(BASE + path, { method, headers: H, body: method === 'GET' ? undefined : (body ?? '{}'), redirect: 'manual' });
   const t = (await r.text()).replace(/\s+/g, ' ').slice(0, 60);
-  return { s: r.status, v: r.headers.get('x-scq-verdict') || '', t };
+  return { s: r.status, v: r.headers.get('x-scq-verdict') || '', b: r.headers.get('x-scq-blocked') || '', c: r.headers.get('set-cookie') || '', t };
 };
 // 403 XML = the older protect_payment_checkout edge rule answering first (needs a real browser
 // session to get past it); it hides our gate, so payment-information spellings are only reported.
 const otherRule = (r) => r.s === 403 && r.t.trimStart().startsWith('<?xml');
-const refused = (r) => r.s === 429 || r.v !== '';
+const refused = (r) => r.b !== '' || r.v !== '';
 let fail = 0;
 const line = (ok, label, r) => { if (!ok) fail++; console.log(`${ok ? 'OK  ' : 'FAIL'} ${String(r.s).padEnd(4)}${(r.v || '-').padEnd(22)}${label}${ok ? '' : '   ' + r.t}`); };
 
@@ -77,7 +79,12 @@ const line = (ok, label, r) => { if (!ok) fail++; console.log(`${ok ? 'OK  ' : '
   }
   console.log('\n== must NOT be refused');
   for (const [m, p, why] of free) { const r = await call(m, p); line(!refused(r), `${m} ${p}  (${why})`, r); }
-  console.log('\n== GraphQL cart mutations, must be refused (needs graphql_gate_mode=block for 429)');
+  console.log('\n== checkout-JS calls issue the scqj cookie (any origin status below 500)');
+  for (const ep of ['estimate-shipping-methods', 'totals-information']) {
+    const r = await call('POST', `/rest/${STORE}/V1/guest-carts/${ID}/${ep}`);
+    line(/(^|,\s*)scqj=/.test(r.c), `POST ${ep} sets scqj`, r);
+  }
+  console.log('\n== GraphQL cart mutations, must be refused (needs graphql_gate_mode=block to be BLOCKED)');
   for (const [n, b] of gqlGated) {
     const r = await call('POST', '/graphql', b);
     if (r.s === 503 && r.t.trimStart().startsWith('<!DOCTYPE')) { console.log(`skip 503 ${'(older edge rule)'.padEnd(22)}POST /graphql ${n}`); continue; }

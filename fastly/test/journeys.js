@@ -1,7 +1,8 @@
 const { chromium } = require('playwright');
+const { DEBUG_HEADERS } = require('./debug');
 // Shared config for the cart-age gate tests. Override with env vars when testing another store.
 // Real-shopper journeys in a real browser. No order is placed (stops before payment).
-//   J1 fast clicker: Next clicked < 10 s after the cart stamp -> 429 too-early, message shown on the
+//   J1 fast clicker: Next clicked < 10 s after the cart stamp -> BLOCKED too-early, message shown on the
 //      page; Next again after the wait -> shipping step passes
 //   J2 reload mid-checkout: reload /checkout/ after the shipping step -> cookies not re-stamped,
 //      Next passes straight away
@@ -12,7 +13,9 @@ const { chromium } = require('playwright');
 //      and MAX_AGE=60 in the env): stale cookies refused on a direct call, renewed by the checkout
 //      page view as already aged -> fast Next passes with no wait
 //   J4 what a blocked shopper sees: forced too-early (fresh stamp) and forced missing proof, the
-//      message must be visible on the page and the shopper must recover (wait / reload)
+//      message must be visible on the page and the shopper must recover (wait / reload). Since
+//      20 Oct 2026 every refusal shows the same "reload the checkout page" message.
+// BLOCKED = Fastly refused the call (X-SCQ-Blocked); needs SCQ_DEBUG_TOKEN, see debug.js.
 const BASE = (process.env.BASE_URL || 'https://mc.mwh-uat.scrip-inc.net').replace(/\/$/, '');
 const STORE = process.env.STORE_CODE || 'massagewarehouse';
 const PRODUCT_URL = process.env.PRODUCT_URL || '/products/gentle-facial-brush-with-cover/';
@@ -22,15 +25,16 @@ const t0 = Date.now();
 const log = (m) => console.log(`[${String(((Date.now() - t0) / 1000).toFixed(1)).padStart(5)}s] ${m}`);
 
 async function shopper(b, name) {
-  const ctx = await b.newContext({ viewport: { width: 1280, height: 900 } });
+  const ctx = await b.newContext({ viewport: { width: 1280, height: 900 }, extraHTTPHeaders: DEBUG_HEADERS });
   const page = await ctx.newPage();
   const calls = [];
   page.on('response', async (res) => {
     const u = res.url();
     if (!/\/guest-carts\/[^/]+\/(shipping-information|set-payment-information|payment-information|order)/.test(u)) return;
     const ep = u.replace(/.*\/guest-carts\/[^/]+\//, '').replace(/\?.*/, '');
-    const v = (await res.allHeaders())['x-scq-verdict'] || '-';
-    calls.push({ ep, status: res.status(), v });
+    const h = await res.allHeaders();
+    const v = h['x-scq-verdict'] || '-';
+    calls.push({ ep, status: res.status(), blocked: !!h['x-scq-blocked'], v });
     log(`${name}: ${res.request().method()} ${ep} -> ${res.status()} verdict=${v} (stamp age ${await age()}s)`);
   });
   const cookie = async (n) => (await ctx.cookies(BASE)).find((c) => c.name === n);
@@ -46,12 +50,15 @@ async function shopper(b, name) {
       await sleep(3000);
     }
     await page.locator('#product-addtocart-button').first().click();
-    await page.waitForResponse((r) => /checkout\/cart\/add/.test(r.url()), { timeout: 30000 });
-    await sleep(1500);
+    const added = await page.waitForResponse((r) => /checkout\/cart\/add/.test(r.url()), { timeout: 30000 });
+    // let the add finish completely: UAT writes the session after the response starts, and a /checkout/
+    // request that reads it too early is redirected to the cart and loses the quote for this session
+    await added.finished();
+    await sleep(3000);
   };
   const openCheckout = async () => {
-    await page.goto(BASE + '/checkout/', { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('#customer-email', { timeout: 120000 });
+    await page.goto(BASE + '/checkout/', { waitUntil: 'domcontentloaded', timeout: 90000 });
+    await page.waitForSelector('#customer-email', { timeout: 120000 }).catch((e) => { log(`${name}: checkout page did not render, at ${page.url()}`); throw e; });
   };
   const fill = async () => {
     const f = async (sel, v) => { const el = page.locator(sel).first(); await el.waitFor({ timeout: 30000 }); await el.fill(v); };
@@ -75,7 +82,8 @@ async function shopper(b, name) {
     await sleep(1500);
     const msgs = (await page.locator('.message-error, .message.error, div[role="alert"]').allInnerTexts()).map((s) => s.trim()).filter(Boolean);
     const onPayment = await page.locator('#checkout-payment-method-load').isVisible().catch(() => false);
-    return { status: r.status(), verdict: (await r.allHeaders())['x-scq-verdict'] || '-', msgs, onPayment };
+    const h = await r.allHeaders();
+    return { status: r.status(), blocked: !!h['x-scq-blocked'], verdict: h['x-scq-verdict'] || '-', msgs, onPayment };
   };
   return { ctx, page, cookie, age, addToCart, openCheckout, fill, next, calls };
 }
@@ -100,7 +108,7 @@ async function shopper(b, name) {
     await sleep(wait * 1000);
     const second = first.onPayment ? first : await s.next();
     log(`J1: second Next -> ${second.status} ${second.verdict}; payment step shown: ${second.onPayment}`);
-    results.push(['J1 fast clicker: first Next blocked with a visible message', first.status === 429 && first.msgs.length > 0 ? 'OK' : (first.status === 200 ? 'n/a (slower than 10 s)' : 'FAIL')]);
+    results.push(['J1 fast clicker: first Next blocked with a visible message', first.blocked && first.msgs.length > 0 ? 'OK' : (first.status === 200 ? 'n/a (slower than 10 s)' : 'FAIL')]);
     results.push(['J1 fast clicker: Next after waiting reaches payment step', second.onPayment ? 'OK' : 'FAIL']);
     await s.ctx.close();
   }
@@ -124,7 +132,7 @@ async function shopper(b, name) {
     const again = await s.next();
     log(`J2: Next after reload -> ${again.status} ${again.verdict}; payment step shown: ${again.onPayment}`);
     results.push(['J2 reload: cookies not re-stamped', before.scq === after.scq && before.scqc === after.scqc ? 'OK' : 'FAIL']);
-    results.push(['J2 reload: Next passes straight away', again.status !== 429 ? 'OK' : 'FAIL']);
+    results.push(['J2 reload: Next passes straight away', !again.blocked ? 'OK' : 'FAIL']);
     await s.ctx.close();
   }
 
@@ -140,7 +148,7 @@ async function shopper(b, name) {
     log(`J3: form filled, stamp age ${await s.age()}s, clicking Next`);
     const first = await s.next();
     log(`J3: Next -> ${first.status} ${first.verdict}; message: ${JSON.stringify(first.msgs)}; payment step shown: ${first.onPayment}`);
-    results.push(['J3 (info) cookies deleted by hand, cart kept: first Next', first.status !== 429 ? 'passes' : `asked to wait (${first.verdict}) - expected, stamp is new`]);
+    results.push(['J3 (info) cookies deleted by hand, cart kept: first Next', !first.blocked ? 'passes' : `asked to wait (${first.verdict}) - expected, stamp is new`]);
     await s.ctx.close();
   }
 
@@ -158,8 +166,8 @@ async function shopper(b, name) {
     await sleep(Math.max(0, 11 - (await s.age())) * 1000);
     const a2 = await s.next();
     log(`J4a after waiting: ${a2.status}; payment step shown: ${a2.onPayment}`);
-    results.push(['J4a too-early: message visible on the page', a.status === 429 && a.msgs.some((m) => /being prepared/i.test(m)) ? 'OK' : `FAIL (${JSON.stringify(a.msgs)})`]);
-    results.push(['J4a too-early: shopper recovers by clicking Next again later', a2.status !== 429 ? 'OK' : 'FAIL']);
+    results.push(['J4a too-early: message visible on the page', a.blocked && a.msgs.some((m) => /reload the checkout page/i.test(m)) ? 'OK' : `FAIL (${JSON.stringify(a.msgs)})`]);
+    results.push(['J4a too-early: shopper recovers by clicking Next again later', !a2.blocked ? 'OK' : 'FAIL']);
     // b) force missing proof: drop scqc, Next -> refresh message; reload the page -> works
     await s.page.goto(BASE + '/checkout/#shipping', { waitUntil: 'domcontentloaded' });
     await s.page.waitForSelector('button.continue', { timeout: 120000 });
@@ -173,8 +181,8 @@ async function shopper(b, name) {
     await s.fill().catch(() => {});
     const b2 = await s.next();
     log(`J4b after reload: ${b2.status} ${b2.verdict}`);
-    results.push(['J4b no proof: reload message visible on the page', bb.status === 429 && bb.msgs.some((m) => /reload the checkout page/i.test(m)) ? 'OK' : `FAIL (${JSON.stringify(bb.msgs)})`]);
-    results.push(['J4b no proof: shopper recovers by reloading the page', b2.status !== 429 ? 'OK' : `FAIL (${b2.verdict})`]);
+    results.push(['J4b no proof: reload message visible on the page', bb.blocked && bb.msgs.some((m) => /reload the checkout page/i.test(m)) ? 'OK' : `FAIL (${JSON.stringify(bb.msgs)})`]);
+    results.push(['J4b no proof: shopper recovers by reloading the page', !b2.blocked ? 'OK' : `FAIL (${b2.verdict})`]);
     await s.ctx.close();
   }
 
@@ -203,7 +211,7 @@ async function shopper(b, name) {
       log(`J5: fast Next -> ${n.status} ${n.verdict}; payment step shown: ${n.onPayment}`);
       results.push(['J5 expired cookies refused on a direct call', /stale/.test(direct) ? 'OK' : `FAIL (${direct})`]);
       results.push(['J5 checkout page view renews both, scq already aged', after.scq !== before.scq && after.scqc !== before.scqc && ageNow >= 25 ? 'OK' : 'FAIL']);
-      results.push(['J5 returning shopper passes on first Next', n.status !== 429 ? 'OK' : `FAIL (${n.verdict})`]);
+      results.push(['J5 returning shopper passes on first Next', !n.blocked ? 'OK' : `FAIL (${n.verdict})`]);
       await s.ctx.close();
     }
   }

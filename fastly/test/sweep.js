@@ -1,14 +1,15 @@
 const { chromium } = require('playwright');
+const { DEBUG_HEADERS, label } = require('./debug');
 // Shared config for the cart-age gate tests. Override with env vars when testing another store.
 // Boundary sweep of the 10 s tier (shipping-information, set-payment-information): one valid stamp,
-// each endpoint hit at several ages. Expect 429 below the threshold, origin status above. No order is placed.
+// each endpoint hit at several ages. Expect BLOCKED below the threshold, origin status above. No order is placed.
 const BASE = (process.env.BASE_URL || 'https://mc.mwh-uat.scrip-inc.net').replace(/\/$/, '');
 const STORE = process.env.STORE_CODE || 'massagewarehouse';
 const R = `/rest/${STORE}/V1`;
 const PRODUCT_URL = process.env.PRODUCT_URL || '/products/gentle-facial-brush-with-cover/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
-  const b = await chromium.launch(); const ctx = await b.newContext(); const page = await ctx.newPage();
+  const b = await chromium.launch(); const ctx = await b.newContext({ extraHTTPHeaders: DEBUG_HEADERS }); const page = await ctx.newPage();
   // real cart + real /checkout/ page so the proof cookie (scqc) is present; only the stamp age varies
   await page.goto(BASE + PRODUCT_URL, { waitUntil: 'domcontentloaded' });
   await page.locator('#product-addtocart-button').first().click();
@@ -26,7 +27,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log('fresh stamp:', scq.value, ' proof:', ((await ctx.cookies(BASE)).find((c) => c.name === 'scqc') || {}).value);
   const post = (path, body) => page.evaluate(async ({ path, body }) => {
     const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) });
-    return r.status;
+    return { s: r.status, b: r.headers.get('x-scq-blocked'), v: r.headers.get('x-scq-verdict') || '-' };
   }, { path, body });
   const addr = { firstname: 'Scq', lastname: 'Gatetest', street: ['123 Main St'], city: 'Chicago', region_id: 23, country_id: 'US', postcode: '60601', telephone: '3125551234' };
   const calls = {
@@ -37,8 +38,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const at = async (age) => {
     const wait = ts + age - Date.now() / 1000; if (wait > 0) await sleep(wait * 1000);
     for (const [name, fn] of Object.entries(calls)) {
-      const s = await fn(); const realAge = (Date.now() / 1000 - ts).toFixed(1);
-      console.log(`age ${String(realAge).padStart(5)}s  ${name}  -> ${s}${s === 429 ? '  BLOCKED by gate' : '  passed gate (origin answered)'}`);
+      const x = await fn(); const realAge = (Date.now() / 1000 - ts).toFixed(1);
+      console.log(`age ${String(realAge).padStart(5)}s  ${name}  -> ${label(x.s, x.b)} verdict=${x.v}${x.b ? '  BLOCKED by gate' : '  passed gate (origin answered)'}`);
     }
     console.log('');
   };
